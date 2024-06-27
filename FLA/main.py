@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-
+import time
 class FLAttention(nn.Module):
     '''
     A faithful attempt at feature level attention.
@@ -60,6 +60,8 @@ class FLAttention(nn.Module):
                 similarity_matrix = self.compute_sim(query, key)
                 
                 attended_value = torch.bmm(similarity_matrix, value.unsqueeze(-1)).squeeze(-1)
+                #to take big matrix out of memory
+                del similarity_matrix
                 representations.append(attended_value)
             
             combined_representations = torch.stack(representations, dim=0).sum(dim=0)
