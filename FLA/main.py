@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
-import time
+
 class FLAttention(nn.Module):
     '''
     A faithful attempt at feature level attention.
@@ -40,6 +40,7 @@ class FLAttention(nn.Module):
         sim_matrix = 1.0 / diff_matrix
 
         sim_matrix = F.softmax(sim_matrix, dim=-1) / torch.sqrt(torch.tensor(y.shape[1]))
+
         return sim_matrix
     
     def forward(self, x):
@@ -93,13 +94,14 @@ class FLANN(nn.Module):
     
     def forward(self, x):
         for i in range(len(self.flas)):
-            x = self.flas[i](x)
-            x = self.activation(x)
-            x = self.fla_norms[i](x)
+            if self.attn_heads!=0:
+                x = self.flas[i](x)
+                x = self.activation(x)
+                x = self.fla_norms[i](x)
             x = self.linears[i](x)
             x = self.activation(x)
             x = self.linear_norms[i](x)
-        x = self.output(x) # torch crossentropy activates with softmax
+        x = self.output(x) # torch crossentropy automatically activates. BCEWithLogitsLoss for binary.
         return x
 
 class UFLAttention(nn.Module):
@@ -161,9 +163,9 @@ class UFLAttention(nn.Module):
             return x + combined_representations
     
 
-class UTAMLP(nn.Module):
+class UFLANN(nn.Module):
     def __init__(self, input_dim, attn_heads, hidden_dims, activation, output_dim=1):
-        super(UTAMLP, self).__init__()
+        super(UFLANN, self).__init__()
 
         self.utab_attn = UFLAttention(dim=input_dim, num_heads=attn_heads)
         self.attn_norm = nn.LayerNorm(input_dim)
@@ -222,7 +224,7 @@ class npDataset(Dataset):
     '''
     def __init__(self, data, labels):
         self.data = torch.tensor(data, dtype=torch.float32)
-        self.labels = torch.tensor(labels, dtype=torch.long)
+        self.labels = torch.tensor(labels, dtype=torch.float32)
 
     def __len__(self):
         return len(self.data)
