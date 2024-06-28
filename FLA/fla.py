@@ -34,7 +34,6 @@ class FLAttention(nn.Module):
     def compute_sim(self, x, y, epsilon=1e-8):
         x = x.unsqueeze(1)
         y = y.unsqueeze(2)
-
         diff_matrix = torch.abs(x - y)
         diff_matrix += epsilon
         sim_matrix = 1.0 / diff_matrix
@@ -56,15 +55,12 @@ class FLAttention(nn.Module):
                 query = head_representations['query']
                 key = head_representations['key']
                 value = head_representations['value']
-
-
-                similarity_matrix = self.compute_sim(query, key)
                 
+                similarity_matrix = self.compute_sim(key, query)
                 attended_value = torch.bmm(similarity_matrix, value.unsqueeze(-1)).squeeze(-1)
-                #to take big matrix out of memory
-                del similarity_matrix
+                # #to take big matrix out of memory
+                # del similarity_matrix
                 representations.append(attended_value)
-            
             combined_representations = torch.stack(representations, dim=0).sum(dim=0)
             return x + combined_representations
         
