@@ -2,34 +2,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+import time
 
 class FLAttention(nn.Module):
     '''
     A faithful attempt at feature level attention.
     One (Q,K,V) triplet per head.
     '''
-    def __init__(self, input_dim, num_heads):
+    def __init__(self, dim, num_heads):
         super(FLAttention, self).__init__()
-        self.input_dim = input_dim
+        self.input_dim = dim
         self.num_heads = num_heads
-
 
         self.alphas = nn.ParameterDict()
         self.betas = nn.ParameterDict()
         self.transformations = ['query', 'key', 'value']
-        for head in range(self.num_heads):
-            for transform in self.transformations:
-                self.alphas[f'{transform}_{head}'] = nn.Parameter(torch.Tensor(1))
-                self.betas[f'{transform}_{head}'] = nn.Parameter(torch.Tensor(1))
-        self.ones = torch.ones(input_dim)
+        for transform in self.transformations:
+            self.alphas[transform] = nn.Parameter(torch.Tensor(1,self.num_heads))
+            self.betas[transform] = nn.Parameter(torch.Tensor(1,self.num_heads))
+        
+        self.ones = torch.ones(dim, 1)
         
         self.reset_parameters()
 
     def reset_parameters(self):
-        for head in range(self.num_heads):
-            for transform in self.transformations:
-                nn.init.uniform_(self.alphas[f'{transform}_{head}'])
-                nn.init.uniform_(self.betas[f'{transform}_{head}'])
+        for transform in self.transformations:
+            nn.init.uniform_(self.alphas[transform])
+            nn.init.uniform_(self.betas[transform])
         
     def compute_sim(self, x, y, epsilon=1e-8):
         x = x.unsqueeze(1)
@@ -39,30 +38,22 @@ class FLAttention(nn.Module):
         diff_matrix += epsilon
         sim_matrix = 1.0 / diff_matrix
         #sim_matrix /= torch.sqrt(torch.tensor(sim_matrix.shape[-1])) normalize here?
-        sim_matrix = F.softmax(sim_matrix, dim=-1) / torch.sqrt(torch.tensor(sim_matrix.shape[-1]))
+        sim_matrix = F.softmax(sim_matrix, dim=-2) / torch.sqrt(torch.tensor(sim_matrix.shape[-1]))
         return sim_matrix
     
     def forward(self, x):
         if self.num_heads == 0:
             return x
         else:
-            representations = []
-            for head in range(self.num_heads):
-                head_representations = {}
-                for t in self.transformations:
-                    head_representations[t] = self.alphas[f'{t}_{head}'] * x + self.betas[f'{t}_{head}'] * self.ones
-                
-                query = head_representations['query']
-                key = head_representations['key']
-                value = head_representations['value']
+            q = x.unsqueeze(-1) @ self.alphas['query'] + self.ones @ self.betas['query']
+            k = x.unsqueeze(-1) @ self.alphas['key'] + self.ones @ self.betas['key']
+            v = x.unsqueeze(-1) @ self.alphas['value'] + self.ones @ self.betas['value']
 
-                similarity_matrix = self.compute_sim(key, query)
-                attended_value = torch.bmm(similarity_matrix, value.unsqueeze(-1)).squeeze(-1)
+            similarity_matrix = self.compute_sim(k, q)
+            attended_value = torch.einsum('bijc,bjc->bic', similarity_matrix, v)
 
-                representations.append(attended_value)
-            
-            combined_representations = torch.stack(representations, dim=0).sum(dim=0)
-            return x + combined_representations
+        combined_representations = torch.sum(attended_value, dim=-1)
+        return x + combined_representations
         
 class FLANN(nn.Module):
     def __init__(self, input_dim, hidden_dims, attn_heads, activation, output_dim=1):
@@ -79,7 +70,7 @@ class FLANN(nn.Module):
         self.linear_norms = nn.ModuleList([nn.LayerNorm(dims[i+1]) for i in range(len(dims)-1)
                                       ])
         
-        if self.attn_heads != 0:
+        if self.attn_heads !=0:
             self.flas = nn.ModuleList([FLAttention(dims[i], num_heads=self.attn_heads) for i in range(len(dims)-1)
                                         ])
             self.fla_norms = nn.ModuleList([nn.LayerNorm(dims[i]) for i in range(len(dims)-1)
@@ -92,7 +83,9 @@ class FLANN(nn.Module):
     def forward(self, x):
         for i in range(len(self.linears)):
             if self.attn_heads!=0:
+                start = time.time()
                 x = self.flas[i](x)
+                print(time.time()-start)
                 x = self.activation(x)
                 x = self.fla_norms[i](x)
             x = self.linears[i](x)
