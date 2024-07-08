@@ -9,10 +9,11 @@ class FLAttention(nn.Module):
     A faithful attempt at feature level attention.
     One (Q,K,V) triplet per head.
     '''
-    def __init__(self, dim, num_heads):
+    def __init__(self, dim, num_heads, agg='sum'):
         super(FLAttention, self).__init__()
         self.input_dim = dim
         self.num_heads = num_heads
+        self.agg = agg
 
         self.alphas = nn.ParameterDict()
         self.betas = nn.ParameterDict()
@@ -22,12 +23,17 @@ class FLAttention(nn.Module):
             self.betas[transform] = nn.Parameter(torch.Tensor(1,self.num_heads))
         
         self.ones = torch.ones(dim, 1)
+
+        if self.agg =='proj':
+            self.proj = nn.Linear(self.input_dim*self.num_heads, self.input_dim)
         
         self.reset_parameters()
 
     def reset_parameters(self):
+        #Learn more about initializations.
         for transform in self.transformations:
             nn.init.uniform_(self.alphas[transform])
+            #zeros?
             nn.init.uniform_(self.betas[transform])
         
     def compute_sim(self, x, y, epsilon=1e-8):
@@ -37,7 +43,6 @@ class FLAttention(nn.Module):
         diff_matrix = torch.abs(x - y)
         diff_matrix += epsilon
         sim_matrix = 1.0 / diff_matrix
-        #sim_matrix /= torch.sqrt(torch.tensor(sim_matrix.shape[-1])) normalize here?
         sim_matrix = F.softmax(sim_matrix, dim=-2) / torch.sqrt(torch.tensor(sim_matrix.shape[-1]))
         return sim_matrix
     
@@ -51,18 +56,24 @@ class FLAttention(nn.Module):
 
             similarity_matrix = self.compute_sim(k, q)
             attended_value = torch.einsum('bijc,bjc->bic', similarity_matrix, v)
-
-        combined_representations = torch.sum(attended_value, dim=-1)
-        return x + combined_representations
+        
+        if self.agg=='sum':
+            combined_reps = torch.sum(attended_value, dim=-1)
+        elif self.agg=='proj':
+            combined_reps = torch.cat([attended_value[:,:,i] for i in range(attended_value.size(-1))],axis=-1)
+            combined_reps = self.proj(combined_reps)
+        
+        return x + combined_reps
         
 class FLANN(nn.Module):
-    def __init__(self, input_dim, hidden_dims, attn_heads, activation, output_dim=1):
+    def __init__(self, input_dim, hidden_dims, attn_heads, activation, agg='sum', output_dim=1):
         super(FLANN, self).__init__()
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
         self.output_dim = output_dim
         self.attn_heads = attn_heads
         self.activation = activation
+        self.agg=agg
 
         dims = [input_dim] + list(hidden_dims)
         self.linears = nn.ModuleList([nn.Linear(dims[i], dims[i+1]) for i in range(len(dims)-1)
@@ -70,8 +81,8 @@ class FLANN(nn.Module):
         self.linear_norms = nn.ModuleList([nn.LayerNorm(dims[i+1]) for i in range(len(dims)-1)
                                       ])
         
-        if self.attn_heads !=0:
-            self.flas = nn.ModuleList([FLAttention(dims[i], num_heads=self.attn_heads) for i in range(len(dims)-1)
+        if self.attn_heads!=0:
+            self.flas = nn.ModuleList([FLAttention(dims[i], num_heads=self.attn_heads, agg=self.agg) for i in range(len(dims)-1)
                                         ])
             self.fla_norms = nn.ModuleList([nn.LayerNorm(dims[i]) for i in range(len(dims)-1)
                                         ])
@@ -83,9 +94,7 @@ class FLANN(nn.Module):
     def forward(self, x):
         for i in range(len(self.linears)):
             if self.attn_heads!=0:
-                start = time.time()
                 x = self.flas[i](x)
-                print(time.time()-start)
                 x = self.activation(x)
                 x = self.fla_norms[i](x)
             x = self.linears[i](x)
@@ -223,6 +232,103 @@ class npDataset(Dataset):
         return self.data[idx], self.labels[idx]
     
 
+class HFLANN(nn.Module):
+    '''
+    An implementation of FLA in which Q and K projections of each feature have length > 1.
+    Can make use of standard ScaledDotProduct attention by reshaping data from (batch, features)
+    to (batch, features, 1).
+    '''
+    def __init__(self, input_dim, embed_dim, hidden_dims, attn_heads, activation, output_dim=1):
+        super(HFLANN, self).__init__()
+        self.input_dim = input_dim
+        self.embed_dim = embed_dim
+        self.hidden_dims = hidden_dims
+        self.output_dim = output_dim
+        self.attn_heads = attn_heads
+        self.activation = activation
+        
 
 
+        dims = [input_dim] + list(hidden_dims)
+        self.linears = nn.ModuleList([nn.Linear(dims[i], dims[i+1]) for i in range(len(dims)-1)
+                                      ])
+        self.linear_norms = nn.ModuleList([nn.LayerNorm(dims[i+1]) for i in range(len(dims)-1)
+                                      ])
+        
+        if self.attn_heads!=0:
+            # self.flas = nn.ModuleList([nn.MultiheadAttention(
+            #     dims[i], num_heads=self.attn_heads) for i in range(len(dims)-1
+            #                                                        )])
+            self.flas = nn.ModuleList([FLAttention(dims[i], num_heads=self.attn_heads) for i in range(len(dims)-1)
+                                        ])
+            self.fla_norms = nn.ModuleList([nn.LayerNorm(dims[i]) for i in range(len(dims)-1)
+                                        ])
+        
+        self.activation = activation
 
+        self.output = nn.Linear(hidden_dims[-1], output_dim)
+    
+    def forward(self, x):
+        for i in range(len(self.linears)):
+            if self.attn_heads!=0:
+                x = self.flas[i](x)
+                x = self.activation(x)
+                x = self.fla_norms[i](x)
+            x = self.linears[i](x)
+            x = self.activation(x)
+            x = self.linear_norms[i](x)
+        x = self.output(x) # torch crossentropy automatically activates. BCEWithLogitsLoss for binary.
+        return x
+
+
+class MultiLinear(nn.Module):
+    def __init__(self, n_heads, input_dim, agg='sum'):
+        super(MultiLinear, self).__init__()
+        self.agg = agg
+        self.sub_linears = nn.ModuleList([nn.Linear(input_dim,input_dim) for i in range(n_heads)])
+        if agg=='proj':
+            self.proj = nn.Linear(input_dim*n_heads, input_dim)
+    
+    def forward(self,x):
+        output = x
+        if self.agg=='sum':
+            output = x + torch.stack([l(x) for l in self.sub_linears]).sum(dim=0)
+        elif self.agg=='proj':
+            output = x + self.proj(torch.cat([l(x) for l in self.sub_linears], dim=-1))
+        return output
+
+class ResNN(nn.Module):
+    def __init__(self, input_dim, hidden_dims, output_dim, res_heads, activation, agg='sum'):
+        super(ResNN, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.output_dim = output_dim
+        self.res_heads = res_heads
+        self.agg = agg
+    
+        dims = [input_dim] + list(hidden_dims)
+        self.linears = nn.ModuleList([nn.Linear(dims[i], dims[i+1]) for i in range(len(dims)-1)
+                                      ])
+        self.linear_norms = nn.ModuleList([nn.LayerNorm(dims[i+1]) for i in range(len(dims)-1)
+                                      ])
+        
+        if self.res_heads!=0:
+            self.res_linears = nn.ModuleList([MultiLinear(input_dim=dims[i], n_heads=self.res_heads, agg=self.agg) for i in range(len(dims)-1)
+                                        ])
+            self.res_norms = nn.ModuleList([nn.LayerNorm(dims[i]) for i in range(len(dims)-1)
+                                        ])
+        
+        self.activation = activation
+        self.output = nn.Linear(hidden_dims[-1], output_dim)
+
+    def forward(self, x):
+        for i in range(len(self.linears)):
+            if self.res_heads!=0:
+                x = self.res_linears[i](x)
+                x = self.activation(x)
+                x = self.res_norms[i](x)
+            x = self.linears[i](x)
+            x = self.activation(x)
+            x = self.linear_norms[i](x)
+        x = self.output(x) # torch crossentropy automatically activates. BCEWithLogitsLoss for binary.
+        return x
