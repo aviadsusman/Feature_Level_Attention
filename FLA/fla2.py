@@ -10,9 +10,9 @@ class TabularAttentionClassifier(nn.Module):
         self.layer_norms = nn.ModuleList()
         
         # Create attention, linear, and normalization layers based on hidden_dims
-        current_dim = embed_dim
+        current_dim = input_dim
         for hidden_dim in hidden_dims:
-            self.attention_layers.append(nn.MultiheadAttention(current_dim, num_heads))
+            self.attention_layers.append(nn.MultiheadAttention(embed_dim, num_heads))
             self.fc_layers.append(nn.Linear(current_dim, hidden_dim))
             self.layer_norms.append(nn.LayerNorm(hidden_dim))
             current_dim = hidden_dim  # Update current_dim for the next layer
@@ -21,7 +21,7 @@ class TabularAttentionClassifier(nn.Module):
 
     def forward(self, x):
         # x shape: (batch_size, input_dim)
-        x = self.embedding(x)  # (batch_size, input_dim) -> (batch_size, embed_dim)
+        # x = self.embedding(x)  # (batch_size, input_dim) -> (batch_size, embed_dim)
         x = x.unsqueeze(0)  # Add sequence length dimension: (1, batch_size, embed_dim)
 
         for attn_layer, fc_layer, layer_norm in zip(self.attention_layers, self.fc_layers, self.layer_norms):

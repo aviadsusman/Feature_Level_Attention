@@ -33,16 +33,15 @@ class FLAttention(nn.Module):
         #Learn more about initializations.
         for transform in self.transformations:
             nn.init.uniform_(self.alphas[transform])
-            #zeros?
-            nn.init.uniform_(self.betas[transform])
+            #zeros or uniform?
+            nn.init.zeros_(self.betas[transform])
         
     def compute_sim(self, x, y, epsilon=1e-8):
         x = x.unsqueeze(1)
         y = y.unsqueeze(2)
-
         diff_matrix = torch.abs(x - y)
         diff_matrix += epsilon
-        sim_matrix = 1.0 / diff_matrix
+        sim_matrix = torch.reciprocal(diff_matrix)
         sim_matrix = F.softmax(sim_matrix, dim=-2) / torch.sqrt(torch.tensor(sim_matrix.shape[-1]))
         return sim_matrix
     
@@ -53,7 +52,6 @@ class FLAttention(nn.Module):
             q = x.unsqueeze(-1) @ self.alphas['query'] + self.ones @ self.betas['query']
             k = x.unsqueeze(-1) @ self.alphas['key'] + self.ones @ self.betas['key']
             v = x.unsqueeze(-1) @ self.alphas['value'] + self.ones @ self.betas['value']
-
             similarity_matrix = self.compute_sim(k, q)
             attended_value = torch.einsum('bijc,bjc->bic', similarity_matrix, v)
         
