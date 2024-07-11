@@ -70,7 +70,6 @@ class FLANN(nn.Module):
         self.hidden_dims = hidden_dims
         self.output_dim = output_dim
         self.attn_heads = attn_heads
-        self.activation = activation
         self.agg=agg
 
         dims = [input_dim] + list(hidden_dims)
@@ -85,7 +84,7 @@ class FLANN(nn.Module):
             self.fla_norms = nn.ModuleList([nn.LayerNorm(dims[i]) for i in range(len(dims)-1)
                                         ])
         
-        self.activation = activation
+        self.activation = activation()
 
         self.output = nn.Linear(hidden_dims[-1], output_dim)
     
@@ -325,6 +324,89 @@ class ResNN(nn.Module):
                 x = self.res_linears[i](x)
                 x = self.activation(x)
                 x = self.res_norms[i](x)
+            x = self.linears[i](x)
+            x = self.activation(x)
+            x = self.linear_norms[i](x)
+        x = self.output(x) # torch crossentropy automatically activates. BCEWithLogitsLoss for binary.
+        return x
+    
+
+class SelfConditioning(nn.Module):
+    '''
+    Giving features contextual awareness of each by conditioning feature vector with itself.
+    '''
+    def __init__(self, input_dim, n_heads, agg='sum', activation=nn.ReLU):
+        super(SelfConditioning, self).__init__()
+        self.input_dim = input_dim
+        self.n_heads = n_heads
+        self.agg = agg
+
+        self.FiLMs = nn.ModuleList([nn.Linear(input_dim, 2*input_dim) for i in range(n_heads)])
+   
+        self.layer_norm = nn.LayerNorm(input_dim)
+
+        self.activation = activation
+        
+        if agg == 'proj':
+            self.proj = nn.Linear(n_heads*input_dim, input_dim)
+    
+    def forward(self, x):
+        if self.n_heads == 0:
+            return x
+        else:
+            alphas = [self.FiLMs[i](x)[:,:self.input_dim] for i in range(self.n_heads)]
+            betas = [self.FiLMs[i](x)[:,self.input_dim:] for i in range(self.n_heads)]
+
+            if self.agg=='sum':
+                x = x + torch.stack([alphas[i]*x+betas[i] for i in range(self.n_heads)],dim=-1).sum(dim=-1)
+            elif self.agg=='proj':
+                x = x + self.proj(torch.cat([alphas[i]*x+betas[i] for i in range(self.n_heads)]))
+            
+            x = self.activation(x)
+            return self.layer_norm(x)
+
+class TabularAwarenessNetwork(nn.Module):
+    '''
+    Class for applying different contextual awareness mechanisms to each feed forward layer
+    of a fully connected network.
+    '''
+    def __init__(self, input_dim, hidden_dims, output_dim, n_heads, agg, activation, mech='fla'):
+        super(TabularAwarenessNetwork, self).__init__()
+        self.input_dim = input_dim
+        self.hidden_dims = hidden_dims
+        self.outout_dim = output_dim
+        self.n_heads = n_heads
+        self.agg = agg
+        self.mech = mech
+        self.activation = activation
+
+        dims = [input_dim] + list(hidden_dims)
+        self.linears = nn.ModuleList([nn.Linear(dims[i], dims[i+1]) for i in range(len(dims)-1)
+                                      ])
+        self.linear_norms = nn.ModuleList([nn.LayerNorm(dims[i+1]) for i in range(len(dims)-1)
+                                      ])
+        mechanisms = {'fla' : FLAttention,
+                      'ufla': UFLAttention,
+                      'res' : ResNN,
+                      'film' : SelfConditioning
+                      # 'hfla': HFLAttention
+                     }
+        awareness = mechanisms[self.mech]
+        if self.n_heads!=0:
+            self.awares = nn.ModuleList([awareness(input_dim = dims[i], n_heads=self.n_heads, agg=self.agg, activation=self.activation) for i in range(len(dims)-1)
+                                        ])
+            
+            #build layer norms into awareness layer
+            # self.fla_norms = nn.ModuleList([nn.LayerNorm(dims[i]) for i in range(len(dims)-1)
+            #                             ])
+        
+        self.activation = activation
+        self.output = nn.Linear(hidden_dims[-1], output_dim)
+    
+    def forward(self, x):
+        for i in range(len(self.linears)):
+            if self.n_heads!=0:
+                x = self.awares[i](x)
             x = self.linears[i](x)
             x = self.activation(x)
             x = self.linear_norms[i](x)
