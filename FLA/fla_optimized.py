@@ -11,23 +11,33 @@ class FLAttention(nn.Module):
     We don't need key betas:
     |aq*xi+bq - ak*xj+bk| = |aq*xi-ak*xj+(bq+bk)|
     Absolute value of bq determines the effect of the softmax. 
-    The larger bq, the less the softmax differentiates entries in sim matrix
+    The larger bq, the less the softmax differentiates entries in sim matrix.
+    Experiment with projecting each feature into the same semantic space before FLA.
+    Once for every head?
     '''
-    def __init__(self, dim, num_heads, agg='sum', bounds=0.5):
+    def __init__(self, dim, num_heads, agg='sum', bounds=0.1, same_sem=True):
         super(FLAttention, self).__init__()
         self.input_dim = dim
         self.num_heads = num_heads
         self.agg = agg
         self.bounds = bounds
+        self.same_sem = same_sem # refers to putting features in the same semantic space before attention
 
         self.alphas = nn.ParameterDict()
         self.betas = nn.ParameterDict()
-        self.transformations = ['query', 'key', 'value']
-        for transform in self.transformations:
-            self.alphas[transform] = nn.Parameter(torch.Tensor(1,self.num_heads))
-            self.betas[transform] = nn.Parameter(torch.Tensor(1,self.num_heads))
-        self.ones = torch.ones(dim, 1)
 
+        self.alphas['query'] = nn.Parameter(torch.Tensor(1,self.num_heads))
+        self.alphas['key'] = nn.Parameter(torch.Tensor(1,self.num_heads))
+        self.alphas['value'] = nn.Parameter(torch.Tensor(self.num_heads,))
+
+        self.betas['query'] = nn.Parameter(torch.Tensor(1,self.num_heads))
+        self.betas['value'] = nn.Parameter(torch.Tensor(1, num_heads))
+
+        self.ones = torch.ones(dim,1)
+        if self.same_sem:
+            self.sem_weights = nn.Parameter(torch.Tensor(self.input_dim))
+            self.sem_biases = nn.Parameter(torch.Tensor(self.input_dim))
+            
         if self.agg =='proj':
             self.proj = nn.Linear(self.input_dim*self.num_heads, self.input_dim)
 
@@ -35,9 +45,15 @@ class FLAttention(nn.Module):
 
     def reset_parameters(self):
         #Learn more about initializations.
-        for transform in self.transformations:
-            nn.init.uniform_(self.alphas[transform], a=1-self.bounds, b=1+self.bounds)
-            nn.init.uniform_(self.betas[transform], a=-self.bounds, b=self.bounds)
+        for key in self.alphas.keys():
+            nn.init.uniform_(self.alphas[key], a=1-self.bounds, b=1+self.bounds)
+        for key in self.betas.keys():
+            nn.init.uniform_(self.betas[key], a=-self.bounds, b=self.bounds)
+    
+        if self.same_sem:
+            nn.init.uniform_(self.sem_weights, a=1-self.bounds, b=1+self.bounds)
+            nn.init.uniform_(self.sem_biases, a=-self.bounds, b=self.bounds)       
+        
         
     def compute_sim(self, x, y, epsilon=1e-8):
         x = x.unsqueeze(1)
@@ -46,28 +62,33 @@ class FLAttention(nn.Module):
         diff_matrix += epsilon
         sim_matrix = torch.reciprocal(diff_matrix)
         sim_matrix = F.softmax(sim_matrix, dim=-2) / torch.sqrt(torch.tensor(sim_matrix.shape[-1]))
+        # sum_of_rows = diff_matrix.sum(dim=-2, keepdim=True)
+        # sim_matrix = (1-diff_matrix/sum_of_rows) / torch.sqrt(torch.tensor(diff_matrix.shape[-1]))
+        # sim_matrix = (F.softmin(diff_matrix, dim=-2))/ torch.sqrt(torch.tensor(diff_matrix.shape[-1]))
+        #doesn't blow up values near 0
+        # sim_matrix = (1-F.softmax(diff_matrix, dim=-2))/ torch.sqrt(torch.tensor(diff_matrix.shape[-1]))
         return sim_matrix
     
     def forward(self, x):
         if self.num_heads == 0:
             return x
         else:
+            if self.same_sem:
+                x = x * self.sem_weights + self.sem_biases
+            
             q = x.unsqueeze(-1) @ self.alphas['query'] + self.ones @ self.betas['query']
-            k = x.unsqueeze(-1) @ self.alphas['key'] + self.ones @ self.betas['key']
-            v = x.unsqueeze(-1) @ self.alphas['value'] + self.ones @ self.betas['value']
+            k = x.unsqueeze(-1) @ self.alphas['key']
             similarity_matrix = self.compute_sim(k, q)
-            # if similarity_matrix.shape[0] != 64:
-            #     if similarity_matrix.shape[1] == 25:
-            #         print(torch.mean(torch.mean(similarity_matrix, dim=0), dim=-1))
-            attended_value = torch.einsum('bijc,bjc->bic', similarity_matrix, v)
         
-        if self.agg=='sum':
-            combined_reps = torch.sum(attended_value, dim=-1)
-        elif self.agg=='proj':
-            combined_reps = torch.cat([attended_value[:,:,i] for i in range(attended_value.size(-1))],axis=-1)
-            combined_reps = self.proj(combined_reps)
-        
-        return x + combined_reps
+            if self.agg=='sum':
+                attended_value = torch.sum(similarity_matrix*self.alphas['value'], dim=-1)
+                combined_reps = torch.bmm(attended_value, x.unsqueeze(-1)).squeeze(-1)
+                combined_reps += torch.sum(torch.sum(similarity_matrix,dim=-2)*self.betas['value'],dim=-1)
+            elif self.agg=='proj':
+                combined_reps = torch.cat([attended_value[:,:,i] for i in range(attended_value.size(-1))],axis=-1)
+                combined_reps = self.proj(combined_reps)
+            
+            return x + combined_reps
         
 class FLANN(nn.Module):
     def __init__(self, input_dim, hidden_dims, attn_heads, activation, agg='sum', output_dim=1):
@@ -105,6 +126,25 @@ class FLANN(nn.Module):
             x = self.linear_norms[i](x)
         x = self.output(x) # torch crossentropy automatically activates. BCEWithLogitsLoss for binary.
         return x
+
+class FLALR(nn.Module):
+    '''
+    FLA + Logistic Regression. Could augment FLANN to do this but whatever.
+    '''
+    def __init__(self, input_dim, num_heads, agg='sum', activation=nn.ReLU):
+        super(FLALR, self).__init__()
+        self.input_dim = input_dim
+        self.num_heads = num_heads
+        self.agg=agg
+
+        self.fla = FLAttention(dim=self.input_dim, num_heads=self.num_heads, agg=self.agg)
+        self.lr = nn.Linear(input_dim, 1)
+        self.activation = activation()
+        self.layer_norm = nn.LayerNorm(self.input_dim)
+    def forward(self,x):
+        if self.num_heads != 0:
+            x = self.layer_norm(self.activation(self.fla(x)))
+        return self.lr(x)
 
 class UFLAttention(nn.Module):
     '''
@@ -440,6 +480,10 @@ class TabularAwarenessNetwork(nn.Module):
         return x
 
 class LinearSoftmax(nn.Module):
+    '''
+    Not FLA. Experimenting with applying operations to a weight matrix of a linear layer before
+    multiplying by a feature vector.
+    '''
     def __init__(self,input_dim, output_dim, activation):
         super(LinearSoftmax, self).__init__()
         
@@ -466,6 +510,10 @@ class GaussianActivation(nn.Module):
         return torch.exp((-(x - self.mean) ** 2)/(2* self.std ** 2))
 
 class MultiActivationLinear(nn.Module):
+    '''
+    Not FLA. Experimenting with making linear layers by concatenating mini-layers with different
+    activations.
+    '''
     def __init__(self, activations, input_dim, nodes_per_activation):
         super(MultiActivationLinear, self).__init__()
         self.input_dim  = input_dim
