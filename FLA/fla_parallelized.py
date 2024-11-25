@@ -8,10 +8,6 @@ class FLAttention(nn.Module):
     '''
     A faithful attempt at feature level attention.
     One (Q,K,V) triplet per head.
-    We don't need key betas:
-    |aq*xi+bq - ak*xj+bk| = |aq*xi-ak*xj+(bq+bk)|
-    Absolute value of bq determines the effect of the softmax. 
-    The larger bq, the less the softmax differentiates entries in sim matrix
     '''
     def __init__(self, dim, num_heads, agg='sum', bounds=0.5):
         super(FLAttention, self).__init__()
@@ -317,6 +313,9 @@ class MultiLinear(nn.Module):
         return output
 
 class ResNN(nn.Module):
+    '''
+    Attention style feature value updates via residual connections.
+    '''
     def __init__(self, input_dim, hidden_dims, output_dim, res_heads, activation, agg='sum'):
         super(ResNN, self).__init__()
         self.input_dim = input_dim
