@@ -7,13 +7,7 @@ from collections.abc import Iterable
 class FLAttention(nn.Module):
     '''
     A faithful attempt at feature level attention.
-    One (Q,K,V) triplet per head.
-    We don't need key betas:
-    |aq*xi+bq - ak*xj+bk| = |aq*xi-ak*xj+(bq+bk)|
-    Absolute value of bq determines the effect of the softmax. 
-    The larger bq, the less the softmax differentiates entries in sim matrix.
-    Experiment with projecting each feature into the same semantic space before FLA.
-    Once for every head?
+    One Q,K,V triplet per head.
     '''
     def __init__(self, dim, num_heads, agg='sum', bounds=0.1, same_sem=True):
         super(FLAttention, self).__init__()
@@ -129,7 +123,7 @@ class FLANN(nn.Module):
 
 class FLALR(nn.Module):
     '''
-    FLA + Logistic Regression. Could augment FLANN to do this but whatever.
+    FLA + Logistic Regression.
     '''
     def __init__(self, input_dim, num_heads, agg='sum', activation=nn.ReLU):
         super(FLALR, self).__init__()
